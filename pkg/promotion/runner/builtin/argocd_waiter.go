@@ -72,6 +72,7 @@ type argocdWaiter struct {
 		ctx context.Context,
 		app *argocd.Application,
 		waitFor []builtin.WaitFor,
+		desiredRevisions []string,
 		prevHealthStatus string,
 	) (ready bool, healthStatus string, err error)
 }
@@ -156,14 +157,36 @@ func (w *argocdWaiter) run(
 			}, err
 		}
 
+		// When matching by selector, ensure enough Applications have been
+		// resolved before evaluating their readiness. A generator such as an
+		// ApplicationSet may not have produced or labeled all expected
+		// Applications yet; succeeding after observing only an early subset
+		// would be a false positive. Defaults to requiring at least one match.
+		if appSpec.Selector != nil {
+			minMatches := 1
+			if appSpec.MinMatches != nil && int(*appSpec.MinMatches) > minMatches {
+				minMatches = int(*appSpec.MinMatches)
+			}
+			if len(apps) < minMatches {
+				logger.Info(
+					"not enough applications match selector yet",
+					"matched", len(apps),
+					"required", minMatches,
+				)
+				allReady = false
+				continue
+			}
+		}
+
 		for _, app := range apps {
 			appKey := fmt.Sprintf("%s/%s", app.Namespace, app.Name)
 			appLogger := logger.WithValues(
 				"app", app.Name, "namespace", app.Namespace,
 			)
 
-			ready, healthStatus, err :=
-				w.checkAppReadinessFn(ctx, app, waitFor, prevHealthStatuses[appKey])
+			ready, healthStatus, err := w.checkAppReadinessFn(
+				ctx, app, waitFor, appSpec.DesiredRevisions, prevHealthStatuses[appKey],
+			)
 			if healthStatus != "" {
 				newHealthStatuses[appKey] = healthStatus
 			}
@@ -212,6 +235,7 @@ func (w *argocdWaiter) checkAppReadiness(
 	ctx context.Context,
 	app *argocd.Application,
 	waitFor []builtin.WaitFor,
+	desiredRevisions []string,
 	prevHealthStatus string,
 ) (ready bool, healthStatus string, err error) {
 	logger := logging.LoggerFromContext(ctx).WithValues(
@@ -318,7 +342,42 @@ func (w *argocdWaiter) checkAppReadiness(
 		}
 	}
 
+	// Revision check. When desired revisions are specified, the Application is
+	// only ready once it is observably synced to each of them. This guards
+	// against trusting a stale "Synced" status carried over from a previous
+	// revision (e.g. when a generator has updated the Application's spec but
+	// Argo CD has not yet re-evaluated it).
+	if len(desiredRevisions) > 0 {
+		observed := observedRevisions(app)
+		for _, desired := range desiredRevisions {
+			if desired == "" {
+				continue
+			}
+			if !slices.Contains(observed, desired) {
+				logger.Info(
+					"revision check not passed",
+					"desiredRevision", desired,
+					"observedRevisions", observed,
+				)
+				return false, healthStatus, nil
+			}
+		}
+	}
+
 	return true, healthStatus, nil
+}
+
+// observedRevisions returns the source revisions an Argo CD Application is
+// currently synced to, drawn from its sync status. Multi-source Applications
+// populate Revisions; single-source Applications populate Revision.
+func observedRevisions(app *argocd.Application) []string {
+	if len(app.Status.Sync.Revisions) > 0 {
+		return app.Status.Sync.Revisions
+	}
+	if app.Status.Sync.Revision != "" {
+		return []string{app.Status.Sync.Revision}
+	}
+	return nil
 }
 
 // operationInProgress returns true if the Application has an operation that is
@@ -393,12 +452,9 @@ func getArgoCDApplications(
 				"error listing Argo CD Applications matching selector: %w", err,
 			)
 		}
-		if len(appList.Items) == 0 {
-			return nil, fmt.Errorf(
-				"no Argo CD Applications found matching selector in namespace %q",
-				namespace,
-			)
-		}
+		// A zero-length result is intentionally not an error here: the caller is
+		// waiting and enforces a minimum match count, so too few matches is a
+		// reason to keep waiting rather than to fail.
 		apps := make([]*argocd.Application, len(appList.Items))
 		for i := range appList.Items {
 			apps[i] = &appList.Items[i]

@@ -121,6 +121,20 @@ type ArgoCDWaitConfig struct {
 }
 
 type ArgoCDAppWait struct {
+	// An optional list of source revisions (e.g. Git commit SHAs or chart versions) that each
+	// matched Argo CD Application must be observably synced to before it is considered ready.
+	// Each specified revision must appear among an Application's synced source revisions. This
+	// guards against trusting a stale 'Synced' status left over from a previous revision.
+	// Typically set using an expression such as commitFrom(...).ID.
+	DesiredRevisions []string `json:"desiredRevisions,omitempty"`
+	// When 'selector' is used, specifies the minimum number of Argo CD Application resources
+	// that must match the selector before their readiness is evaluated. Until at least this
+	// many Applications match, the step keeps waiting. This guards against a race in which a
+	// generator (such as an ApplicationSet) has not yet produced or labeled all expected
+	// Applications, causing the step to prematurely succeed after observing only an early
+	// subset. Ignored when 'name' is used. Defaults to 0, in which case at least one match is
+	// required.
+	MinMatches *int64 `json:"minMatches,omitempty"`
 	// Specifies the exact name of an Argo CD Application resource to wait for. Mutually
 	// exclusive with 'selector'.
 	Name string `json:"name,omitempty"`

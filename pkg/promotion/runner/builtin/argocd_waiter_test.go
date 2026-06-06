@@ -122,6 +122,37 @@ func Test_argocdWaiter_convert(t *testing.T) {
 			},
 			expectedProblems: nil,
 		},
+		{
+			name: "minMatches must not be negative",
+			config: promotion.Config{
+				"apps": []promotion.Config{
+					{
+						"selector": promotion.Config{
+							"matchLabels": map[string]string{"env": "prod"},
+						},
+						"minMatches": -1,
+					},
+				},
+			},
+			expectedProblems: []string{
+				"apps.0.minMatches: Must be greater than or equal to 0",
+			},
+		},
+		{
+			name: "valid config with selector, minMatches and desiredRevisions",
+			config: promotion.Config{
+				"apps": []promotion.Config{
+					{
+						"selector": promotion.Config{
+							"matchLabels": map[string]string{"env": "prod"},
+						},
+						"minMatches":       3,
+						"desiredRevisions": []string{"abc123"},
+					},
+				},
+			},
+			expectedProblems: nil,
+		},
 	}
 	runner := &argocdWaiter{}
 	runner.schemaLoader = getConfigSchemaLoader(stepKindArgoCDWait)
@@ -177,7 +208,7 @@ func Test_argocdWaiter_run(t *testing.T) {
 				getApplicationsFn: appsFn(&argocd.Application{}),
 				checkAppReadinessFn: func(
 					context.Context, *argocd.Application,
-					[]builtin.WaitFor, string,
+					[]builtin.WaitFor, []string, string,
 				) (bool, string, error) {
 					return false, "", &promotion.TerminalError{
 						Err: errors.New("bad condition"),
@@ -203,7 +234,7 @@ func Test_argocdWaiter_run(t *testing.T) {
 				}),
 				checkAppReadinessFn: func(
 					context.Context, *argocd.Application,
-					[]builtin.WaitFor, string,
+					[]builtin.WaitFor, []string, string,
 				) (bool, string, error) {
 					return false, "Progressing", nil
 				},
@@ -232,7 +263,7 @@ func Test_argocdWaiter_run(t *testing.T) {
 				},
 				checkAppReadinessFn: func(
 					_ context.Context, app *argocd.Application,
-					_ []builtin.WaitFor, _ string,
+					_ []builtin.WaitFor, _ []string, _ string,
 				) (bool, string, error) {
 					return app.Name == "app-a", "", nil
 				},
@@ -254,7 +285,7 @@ func Test_argocdWaiter_run(t *testing.T) {
 				getApplicationsFn: appsFn(&argocd.Application{}),
 				checkAppReadinessFn: func(
 					context.Context, *argocd.Application,
-					[]builtin.WaitFor, string,
+					[]builtin.WaitFor, []string, string,
 				) (bool, string, error) {
 					return true, "Healthy", nil
 				},
@@ -269,6 +300,105 @@ func Test_argocdWaiter_run(t *testing.T) {
 			},
 		},
 		{
+			name: "selector matches fewer than minMatches returns Running",
+			runner: &argocdWaiter{
+				argocdClient: fake.NewFakeClient(),
+				getApplicationsFn: func(
+					_ context.Context, _ client.Client,
+					_, _ string, _ *builtin.ArgoCDAppSelector,
+				) ([]*argocd.Application, error) {
+					// Only one Application has been produced/labeled so far.
+					return []*argocd.Application{{
+						ObjectMeta: metav1.ObjectMeta{Name: "app-a", Namespace: "argocd"},
+					}}, nil
+				},
+				checkAppReadinessFn: func(
+					context.Context, *argocd.Application,
+					[]builtin.WaitFor, []string, string,
+				) (bool, string, error) {
+					// Even though the matched app is ready, too few have matched.
+					return true, "Healthy", nil
+				},
+			},
+			stepCtx: &promotion.StepContext{},
+			stepCfg: builtin.ArgoCDWaitConfig{
+				Apps: []builtin.ArgoCDAppWait{{
+					Selector: &builtin.ArgoCDAppSelector{
+						MatchLabels: map[string]string{"env": "prod"},
+					},
+					MinMatches: new(int64(3)),
+				}},
+			},
+			assertions: func(t *testing.T, res promotion.StepResult, err error) {
+				require.NoError(t, err)
+				assert.Equal(t, kargoapi.PromotionStepStatusRunning, res.Status)
+			},
+		},
+		{
+			name: "selector matches at least minMatches and all ready returns Succeeded",
+			runner: &argocdWaiter{
+				argocdClient: fake.NewFakeClient(),
+				getApplicationsFn: func(
+					_ context.Context, _ client.Client,
+					_, _ string, _ *builtin.ArgoCDAppSelector,
+				) ([]*argocd.Application, error) {
+					return []*argocd.Application{
+						{ObjectMeta: metav1.ObjectMeta{Name: "app-a", Namespace: "argocd"}},
+						{ObjectMeta: metav1.ObjectMeta{Name: "app-b", Namespace: "argocd"}},
+					}, nil
+				},
+				checkAppReadinessFn: func(
+					context.Context, *argocd.Application,
+					[]builtin.WaitFor, []string, string,
+				) (bool, string, error) {
+					return true, "Healthy", nil
+				},
+			},
+			stepCtx: &promotion.StepContext{},
+			stepCfg: builtin.ArgoCDWaitConfig{
+				Apps: []builtin.ArgoCDAppWait{{
+					Selector: &builtin.ArgoCDAppSelector{
+						MatchLabels: map[string]string{"env": "prod"},
+					},
+					MinMatches: new(int64(2)),
+				}},
+			},
+			assertions: func(t *testing.T, res promotion.StepResult, err error) {
+				require.NoError(t, err)
+				assert.Equal(t, kargoapi.PromotionStepStatusSucceeded, res.Status)
+			},
+		},
+		{
+			name: "selector with zero matches defaults to requiring one returns Running",
+			runner: &argocdWaiter{
+				argocdClient: fake.NewFakeClient(),
+				getApplicationsFn: func(
+					_ context.Context, _ client.Client,
+					_, _ string, _ *builtin.ArgoCDAppSelector,
+				) ([]*argocd.Application, error) {
+					return nil, nil
+				},
+				checkAppReadinessFn: func(
+					context.Context, *argocd.Application,
+					[]builtin.WaitFor, []string, string,
+				) (bool, string, error) {
+					return true, "Healthy", nil
+				},
+			},
+			stepCtx: &promotion.StepContext{},
+			stepCfg: builtin.ArgoCDWaitConfig{
+				Apps: []builtin.ArgoCDAppWait{{
+					Selector: &builtin.ArgoCDAppSelector{
+						MatchLabels: map[string]string{"env": "prod"},
+					},
+				}},
+			},
+			assertions: func(t *testing.T, res promotion.StepResult, err error) {
+				require.NoError(t, err)
+				assert.Equal(t, kargoapi.PromotionStepStatusRunning, res.Status)
+			},
+		},
+		{
 			name: "previous health statuses passed to checkAppReadiness",
 			runner: &argocdWaiter{
 				argocdClient: fake.NewFakeClient(),
@@ -277,7 +407,7 @@ func Test_argocdWaiter_run(t *testing.T) {
 				}),
 				checkAppReadinessFn: func(
 					_ context.Context, _ *argocd.Application,
-					_ []builtin.WaitFor, prevStatus string,
+					_ []builtin.WaitFor, _ []string, prevStatus string,
 				) (bool, string, error) {
 					assert.Equal(t, "Progressing", prevStatus)
 					return true, "Healthy", nil
@@ -320,6 +450,7 @@ func Test_argocdWaiter_checkAppReadiness(t *testing.T) {
 		app              *argocd.Application
 		storedApp        *argocd.Application // pre-loaded into fake client for refresh patch
 		waitFor          []builtin.WaitFor
+		desiredRevisions []string
 		prevHealthStatus string
 		assertions       func(*testing.T, bool, string, error)
 	}{
@@ -539,6 +670,78 @@ func Test_argocdWaiter_checkAppReadiness(t *testing.T) {
 				require.NoError(t, err)
 			},
 		},
+		{
+			name: "desired revision matches synced revision returns ready",
+			app: &argocd.Application{
+				Status: argocd.ApplicationStatus{
+					Health: argocd.HealthStatus{Status: argocd.HealthStatusHealthy},
+					Sync: argocd.SyncStatus{
+						Status:   argocd.SyncStatusCodeSynced,
+						Revision: "abc123",
+					},
+				},
+			},
+			waitFor:          defaultWaitFor,
+			desiredRevisions: []string{"abc123"},
+			assertions: func(t *testing.T, ready bool, _ string, err error) {
+				assert.True(t, ready)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "stale synced status with old revision returns not ready",
+			app: &argocd.Application{
+				Status: argocd.ApplicationStatus{
+					Health: argocd.HealthStatus{Status: argocd.HealthStatusHealthy},
+					Sync: argocd.SyncStatus{
+						Status:   argocd.SyncStatusCodeSynced,
+						Revision: "old456",
+					},
+				},
+			},
+			waitFor:          defaultWaitFor,
+			desiredRevisions: []string{"abc123"},
+			assertions: func(t *testing.T, ready bool, _ string, err error) {
+				assert.False(t, ready)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "all desired revisions found among multi-source revisions returns ready",
+			app: &argocd.Application{
+				Status: argocd.ApplicationStatus{
+					Health: argocd.HealthStatus{Status: argocd.HealthStatusHealthy},
+					Sync: argocd.SyncStatus{
+						Status:    argocd.SyncStatusCodeSynced,
+						Revisions: []string{"abc123", "v1.2.3"},
+					},
+				},
+			},
+			waitFor:          defaultWaitFor,
+			desiredRevisions: []string{"abc123"},
+			assertions: func(t *testing.T, ready bool, _ string, err error) {
+				assert.True(t, ready)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "desired revision absent from multi-source revisions returns not ready",
+			app: &argocd.Application{
+				Status: argocd.ApplicationStatus{
+					Health: argocd.HealthStatus{Status: argocd.HealthStatusHealthy},
+					Sync: argocd.SyncStatus{
+						Status:    argocd.SyncStatusCodeSynced,
+						Revisions: []string{"old456", "v1.2.3"},
+					},
+				},
+			},
+			waitFor:          defaultWaitFor,
+			desiredRevisions: []string{"abc123"},
+			assertions: func(t *testing.T, ready bool, _ string, err error) {
+				assert.False(t, ready)
+				require.NoError(t, err)
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -557,7 +760,8 @@ func Test_argocdWaiter_checkAppReadiness(t *testing.T) {
 
 			w := &argocdWaiter{argocdClient: argocdClient}
 			ready, healthStatus, err := w.checkAppReadiness(
-				context.Background(), tc.app, tc.waitFor, tc.prevHealthStatus,
+				context.Background(), tc.app, tc.waitFor,
+				tc.desiredRevisions, tc.prevHealthStatus,
 			)
 			tc.assertions(t, ready, healthStatus, err)
 		})

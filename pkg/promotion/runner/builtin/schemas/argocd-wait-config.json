@@ -22,6 +22,21 @@
           "$ref": "argocd-common.json#/definitions/argoCDAppSelector",
           "description": "Specifies a label selector to match Argo CD Application resources to wait for. Mutually exclusive with 'name'."
         },
+        "minMatches": {
+          "type": "integer",
+          "description": "When 'selector' is used, specifies the minimum number of Argo CD Application resources that must match the selector before their readiness is evaluated. Until at least this many Applications match, the step keeps waiting. This guards against a race in which a generator (such as an ApplicationSet) has not yet produced or labeled all expected Applications, causing the step to prematurely succeed after observing only an early subset. Ignored when 'name' is used. Defaults to 0, in which case at least one match is required.",
+          "minimum": 0
+        },
+        "desiredRevisions": {
+          "type": "array",
+          "description": "An optional list of source revisions (e.g. Git commit SHAs or chart versions) that each matched Argo CD Application must be observably synced to before it is considered ready. Each specified revision must appear among an Application's synced source revisions. This guards against trusting a stale 'Synced' status left over from a previous revision. Typically set using an expression such as commitFrom(...).ID.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
         "waitFor": {
           "type": "array",
           "description": "Specifies the conditions to wait for. Valid values are 'health', 'sync', 'operation', 'suspended', and 'degraded'. Health-related conditions (health, suspended, degraded) are OR'd. All other conditions are AND'd. Defaults to ['health', 'sync', 'operation'] when omitted.",
